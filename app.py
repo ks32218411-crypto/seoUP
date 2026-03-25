@@ -42,6 +42,18 @@ st.markdown("""
 *(⚠️ 이미지 크기가 너무 거대하면 무료 서버 CPU가 연산하다 뻗을 수도 있습니다. 작은 짤방/캐릭터 그림용으로 쓰세요!)*
 """)
 
+# ================= Sidebar: 고급 세부 설정 =================
+st.sidebar.header("🎛️ AI 미세조정 (Finetuning)")
+denoise_level = st.sidebar.slider("🧹 노이즈 제거 (잡티 지우기)", min_value=0.0, max_value=10.0, value=3.0, step=0.5, 
+                                  help="수치를 올리면 옛날 사진의 자글자글한 노이즈가 부드럽게 밀립니다. (단점: 너무 올리면 수채화처럼 뭉개짐)")
+
+sharpen_level = st.sidebar.slider("🔪 선명도 (샤프니스)", min_value=0.0, max_value=2.0, value=0.5, step=0.1,
+                                  help="수치를 올리면 흐릿한 윤곽선이 칼처럼 날카로워집니다. (단점: 너무 올리면 픽셀이 깨져 보임)")
+
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **추천 셋팅**: 인물/풍경 사진은 디노이즈를 살짝 주고(2.0), 애니메이션/글씨는 샤프니스(1.0)를 주면 좋습니다.")
+# =========================================================
+
 # 백그라운드 엔진 점화
 try:
     sr = load_ai()
@@ -56,25 +68,40 @@ if uploaded_file is not None:
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     image_bgr = cv2.imdecode(file_bytes, 1) # OpenCV가 좋아하는 파랑-초록-빨강(BGR) 포맷
     
-    # 2. 웹에서 예쁘게 보여주기 위해 레드-그린-블루(RGB) 포맷으로 변환
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    
     # 원본 세로(h), 가로(w) 길이 추출
-    orig_h, orig_w = image_rgb.shape[:2]
+    orig_h, orig_w = image_bgr.shape[:2]
     
-    # 3. 화면을 두 개의 기둥(Column)으로 좌우 분할해서 Before & After 효과 연출
+    # --- [추가] 실시간 프리뷰 생성 (0.1초 만에 가벼운 윤곽선 필터만 먼저 씌워보기) ---
+    preview_bgr = image_bgr.copy()
+    if denoise_level > 0:
+        preview_bgr = cv2.fastNlMeansDenoisingColored(preview_bgr, None, denoise_level, denoise_level, 7, 21)
+    if sharpen_level > 0:
+        kernel = np.array([
+            [0, -1, 0], 
+            [-1, 5, -1], 
+            [0, -1, 0]
+        ])
+        hard_sharpened = cv2.filter2D(preview_bgr, -1, kernel)
+        preview_bgr = cv2.addWeighted(preview_bgr, 1.0 - (sharpen_level / 2.0), hard_sharpened, (sharpen_level / 2.0), 0)
+        
+    # 웹에서 예쁘게 보여주기 위해 레드-그린-블루(RGB) 포맷으로 최종 변환
+    preview_rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
+    # -------------------------------------------------------------
+    
+    # 3. 화면을 두 개의 기둥(Column)으로 좌우 분할해서 Before & After 연출
     st.write("---")
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader(f"🔍 원본 이미지 (`{orig_w} x {orig_h}`)")
+        st.subheader(f"👀 실시간 필터 프리뷰 (`{orig_w} x {orig_h}`)")
+        st.caption("✅ 1초(왼쪽 패널): 슬라이더를 움직이면 0.1초 만에 효과가 덧씌워진 원본 크기를 보여줍니다.")
         # use_container_width=True 로 하면 브라우저 폭에 맞춰 꽉 차게 띄워줌
-        st.image(image_rgb, use_container_width=True)
+        st.image(preview_rgb, use_container_width=True)
         
     st.divider()
     
-    # 4. 버튼을 만들어두고 유저가 허락할 때 연산 시작
-    start_btn = st.button("🔥 미친 화질로 4배 복원 시작!", type="primary")
+    # 4. 버튼을 만들어두고 유저가 허락할 때 엄청 무거운 4배수 AI 연산 시작
+    start_btn = st.button("🔥 15초(오른쪽 패널): 미친 화질로 4배 AI 복원 시작!", type="primary")
     
     if start_btn:
         # 안전장치: 이미 원본이 1000픽셀이 넘어가면 무료 서버에서 터질 확률이 높음
@@ -83,8 +110,27 @@ if uploaded_file is not None:
             
         with st.spinner("🧠 AI가 깨진 픽셀을 정밀하게 다시 채워넣고 있습니다... (화면 끄지 마세요)"):
             try:
-                # 5. 매직 시작! (AI가 이미지를 통째로 다시 그림)
-                result_bgr = sr.upsample(image_bgr)
+                # [스텝 1] : 업스케일링 전 노이즈 제거 (가장 빠르고 효율적인 순서)
+                if denoise_level > 0:
+                    processed_bgr = cv2.fastNlMeansDenoisingColored(image_bgr, None, denoise_level, denoise_level, 7, 21)
+                else:
+                    processed_bgr = image_bgr
+                    
+                # [스텝 2] : 매직 시작! (AI가 이미지를 통째로 다시 그림)
+                result_bgr = sr.upsample(processed_bgr)
+                
+                # [스텝 3] : 업스케일링 후 샤프닝 커널 덮어씌우기 (선명도 극대화)
+                if sharpen_level > 0:
+                    # 샤프닝을 위한 OpenCV 필터 행렬 (Convolution Kernel)
+                    kernel = np.array([
+                        [0, -1, 0], 
+                        [-1, 5, -1], 
+                        [0, -1, 0]
+                    ])
+                    # 필터 적용된 강력한 날카로운 이미지 생성
+                    hard_sharpened = cv2.filter2D(result_bgr, -1, kernel)
+                    # 유저가 설정한 슬라이더 수치(Level)만큼 원본과 날카로운 이미지를 비율 섞기 (블렌딩)
+                    result_bgr = cv2.addWeighted(result_bgr, 1.0 - (sharpen_level / 2.0), hard_sharpened, (sharpen_level / 2.0), 0)
                 
                 # 결과물을 다시 모니터용 RGB로 변환
                 result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
